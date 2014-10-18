@@ -1,0 +1,119 @@
+#!/usr/bin/perl -Wl
+# vim: se tabstop=4 fdm=marker:
+
+# Does not 'walk' oid tree's. Expects hard coded oid's. This is not a good method but its faster -
+# 6 oid's from 650+ machines in 4 seconds. All machines were responding, so this does not take timeouts into account.
+# Results are not normalized.
+
+use strict;
+use Net::SNMP;
+use YAML::Syck;
+use Range;
+
+use FindBin;
+my $conf_path 	= $FindBin::Bin;
+my $config 	= $conf_path . '/snmp.yaml';
+#my $conf	= do { local $/; YAML::Syck::Load(<DATA>); };
+my $conf 	= YAML::Syck::LoadFile($config);
+die "No config found \n" unless $conf;
+
+
+my (@nodes,@nodes_range);
+
+for my $prop ( keys %{$conf->{'hostgroup'}} ) {
+	my $top		= $conf->{'hostgroup'}->{$prop};
+	my $resolver	= $top->{'resolver'};
+	if ( $resolver eq 'range' ) {
+		warn "No clusters for resolver range\n" and next
+			unless defined $top->{'clusters'};
+		my $vip	= $top->{'vip'} ? $top->{'vip'} : 'range';
+		my $r   = Range->new(
+			'list'		=> 1,
+			'server'	=> $vip,
+		);
+		for my $cluster (@{$top->{'clusters'}}) {
+			my @range = $r->expand('%' . $cluster);
+			warn $r->last_err if $r->last_err;
+			push(@nodes_range,@range) if @range;
+		}
+	}
+
+
+}
+
+@nodes = (@nodes_range);
+
+my %oids = %{$conf->{'oids'}};
+my @oids = values(%oids);
+
+# Copied off Net::SNMP man page
+# Start snmp
+for my $host (@nodes) {
+	my ($session,$error) = Net::SNMP->session(
+		-hostname	=> $host,
+		-community	=> $conf->{'community'},
+		-timeout	=> $conf->{'timeout'},
+		-nonblocking => 1,
+	);
+
+	if ( !defined $session ) {
+		printf "Error on creating session for %s: %s\n",
+			$host,
+			$error;
+		next;
+	}
+
+	my $result = $session->get_request(
+		-varbindlist => \@oids,
+		-callback    => [\&get_callback, $host],
+	);
+
+	if ( !defined $result )  {
+		printf "Failed to get result from %s: %s\n",
+			$session->hostname(),
+			$session->error();
+	}
+}
+
+snmp_dispatcher();
+exit(0);
+
+
+sub get_callback {
+	my ($session,$host) = @_;
+	my $result = $session->var_bind_list();
+
+	if ( !defined $result ) {
+		printf "Error: get resposne failed for %s: %s\n",
+			$session->hostname(),
+			$session->error();
+		return;
+	}
+	my $res;
+	for my $oid ( keys %oids ) {
+		$res->{$session->hostname()}->{$oid} = $result->{$oids{$oid}};
+	}
+	print Dump $res;
+	return;
+}
+__END__
+---
+hostgroup:
+   Advserving-ngd.us:
+      resolver: range
+      vip: range
+      clusters:
+         - %cluster1
+         - cluster2
+   foobar:
+      resolver: xxxxx
+oids: #  snmptranslate -Tp 1.3 for the tree. Works with some snmp versions
+   sysUptime: 1.3.6.1.2.1.1.3.0
+   BootMsg: 1.3.6.1.2.1.25.1.4.0
+   memTotalSwap: 1.3.6.1.4.1.2021.4.3.0
+   memAvailSwap: 1.3.6.1.4.1.2021.4.4.0
+   memAvailReal: 1.3.6.1.4.1.2021.4.5.0
+   memTotalReal: 1.3.6.1.4.1.2021.4.6.0
+   sysName: 1.3.6.1.2.1.1.5.0
+community: public
+timeout: 10

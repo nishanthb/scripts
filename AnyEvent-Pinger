@@ -1,0 +1,122 @@
+#!/usr/local/bin/perl -w
+use strict;
+use warnings;
+
+use AnyEvent;
+use AnyEvent::Ping;
+
+use YAML::Syck;
+use Getopt::Long;
+
+die "Run me as root, needed for ICMP ping\n"
+	if $<;
+my %opt = (
+	"n|nodes=s@"   => "List of nodes to ping, listed multiple times as -n node1 -n node2...",
+	"h|help"       => "Prints this help",
+	"v|verbose"    => "Prints more info",
+	"c|config=s"   => "YAML config file with array of hosts, will add -n hosts to this if present",
+	"z|zero"       => "Return 0 lat for unpingable nodes, else will remove these nodes from response",
+	"d|dumpfile=s" => "YAML dumpfile to dump data, useful for watchers, adds .epoch.yaml suffix to input",
+	"t|timeout=i"  => "Timeout for each node, default 3 seconds",
+	"K|kill=i"     => "Kills the ping after this many seconds, default 30",
+);
+
+
+my %inp;
+GetOptions(\%inp, keys %opt)
+	or usage();
+
+usage() if $inp{h};
+sub usage {
+	print "Usage: $0 [options], where options are:\n";
+	map {
+		my ($a,$b) = split(/\|/,$_);$b = $a unless $b;$b=~s/=.+//;
+		printf("  -%s --%-10s  %s\n",$a,$b,$opt{$_});
+	} keys %opt;
+	exit(1);
+}
+
+#use constant { 
+#	Y_APP  => 'pinger',
+#};
+
+#my $push     = $inp{p};
+my $verbose  = $inp{v};
+my $config   = ($inp{c} and -r $inp{c}) ? YAML::Syck::LoadFile($inp{c}) : undef();
+my @nodes    = @$config if $config;
+my $zero     = $inp{z};
+my $dumpfile = $inp{d};
+my $timeout  = $inp{t} ||= 3;
+my $kill     = $inp{K} ||= 30;
+my $cv       = AnyEvent->condvar();
+my $ping     = AnyEvent::Ping->new();
+
+
+alarm($kill);
+$SIG{ALRM}  = sub { 
+	warn "Process timed out at ",scalar localtime(time()),"\n";
+	exit(1);
+};
+
+push(@nodes,@{$inp{n}}) if $inp{n};
+die "No nodes to ping\n" unless @nodes;
+my %ret      = map { $_ => undef } @nodes;	 # Initialize as undef
+
+
+for my $node (@nodes) { 
+	resolv($node) || next;
+	$cv->begin();
+	eval { 
+	$ping->ping($node,$timeout,sub { 
+		my $res     = shift;
+		if($res->[0][0] ne 'OK') { 
+			$ret{$node} = undef();
+		}
+		else { 
+			$ret{$node} = $res->[0][1] * 1000; # ms
+		}
+		$cv->end();
+	}
+	);
+	};
+	if($@) { 
+		chomp($@);
+		warn "Pinger for $node reported ", $ping->error() ?  $ping->error()  : "$@", "\n";
+	}
+}
+
+$cv->recv();
+$ping->end();
+
+
+if ($dumpfile) { 
+	$dumpfile .= "." . time() . ".yaml";
+	YAML::Syck::DumpFile($dumpfile,\%ret);
+}
+
+# Normalize this, set to 0 or not return? Added as a passable parameter -z
+$zero	?  map { $ret{$_} = 0    unless defined  $ret{$_} } keys %ret
+	:  map { delete $ret{$_} unless defined  $ret{$_} } keys %ret;
+
+print YAML::Syck::Dump \%ret if $verbose;
+
+
+sub resolv { 
+	my ($node) = @_;
+	use Socket;
+	my ($ia,$ip);
+	eval { 
+		$ia = inet_aton($node);
+		if(defined($ia)) { 
+			$ip = gethostbyaddr($ia,AF_INET)||undef;
+		}
+		else { 
+			return;
+		}
+	};
+	if($@) { return };
+	if(defined($ip)) { return $ip };
+	return;
+	
+}
+# vim: se tabstop=8 :

@@ -1,0 +1,194 @@
+#!/usr/bin/perl
+# vim: set tabstop=4 fdm=marker :
+use strict;
+use warnings 'all';
+
+use YAML::Syck;
+use Getopt::Long;
+use Net::Curl::Easy  qw(/^CURLOPT_/ /^CURLINFO_/);
+
+my %opt = (
+	"u|url=s"      => "URL to work on",
+	"d|datafile=s" => "Path to postdata file. If this is specified the request will be a post, the postdata will be read from datafile specified.",
+	"v|verbose"    => "Prints more info, enables curl's verbose mode too",
+	"h|help"       => "Prints this help",
+	"o|options=s%" => "Curl like options, use -c  to view supported options. Can be used multiple times as -o follow=1 -o noprogress=0..",
+	"c|curlopts"   => "Prints supported curl options and exits",
+	"f|file=s"     => "File to write http content, default stdout",
+	"e|errfile=s"  => "Error file, write transaction result on no success",
+);
+
+my %inp;
+GetOptions(\%inp,keys %opt)
+	or usage();
+usage() if $inp{h};
+sub usage{
+	warn "Usage: $0 [options], where options are:\n";
+	map {
+		my ($a,$b) = split(/\|/,$_);
+		$b = $a unless $b;
+		$b =~ s/=.+//;
+		warn sprintf("  -%s --%-10s    %-10s\n",$a,$b,$opt{$_});
+	} sort keys %opt;
+	exit(1);
+}
+
+my $url          = $inp{u};
+my $data         = $inp{d};
+my $verbose      = $inp{v};
+my $dumpopt      = $inp{c};
+my $file         = $inp{f};
+my $errfile      = $inp{e};
+my $curl         = Net::Curl::Easy->new();
+
+if (!$url and !$dumpopt){
+	warn "URL not specified. Can't continue\n";
+	usage();
+};
+
+sub set_curlopt {
+	my ($opt,$value) = @_;
+	eval {
+		$curl->setopt($opt => $value);
+	};
+	if($@ and ref($@) eq 'Net::Curl::Easy::Code') {
+		chomp($@);
+		warn "cURL setopt resulted in error: ",$@,"\n";
+		return(0);
+	}
+}
+
+my %curlopt;
+# http://curl.haxx.se/libcurl/c/curl_easy_setopt.html
+my %map = ( 	# To translate these to numeric. Dont see a better way to do this.
+	ua              => sprintf(CURLOPT_USERAGENT),
+	verbose         => sprintf(CURLOPT_VERBOSE),
+	header          => sprintf(CURLOPT_HEADER),
+	noprogress      => sprintf(CURLOPT_NOPROGRESS),
+	user            => sprintf(CURLOPT_USERNAME),
+	pass            => sprintf(CURLOPT_PASSWORD),
+	follow          => sprintf(CURLOPT_FOLLOWLOCATION),
+	cookiefile      => sprintf(CURLOPT_COOKIEFILE),
+	timeout         => sprintf(CURLOPT_TIMEOUT),
+	connect_timeout => sprintf(CURLOPT_CONNECTTIMEOUT),
+	#aaaa           => sprintf(bbbb),
+);
+
+if($verbose) {
+	set_curlopt(sprintf(CURLOPT_VERBOSE) => 1);
+}
+# These should be zero terminated
+my %zero_term = map { $_ => 1 }  (qw(
+	user
+	pass
+	cookiefile
+));
+
+print join("\n",keys %map),"\n" and exit(1)
+	if $dumpopt;
+
+my %default_opt = (
+	# Use sprintf(CURLOPT_xx) here since otherwise it is considered a string, and Net::Curl will not recognize it.
+	sprintf(CURLOPT_USERAGENT)         => 'Mozilla/5.0',
+	sprintf(CURLOPT_FOLLOWLOCATION)    => 1,
+	sprintf(CURLOPT_AUTOREFERER)       => 1,
+	sprintf(CURLOPT_NOPROGRESS)        => 1,
+	sprintf(CURLOPT_DEBUGFUNCTION)     => 0,
+	sprintf(CURLOPT_VERBOSE)           => 0,
+	#sprintf(aaaa)                     => bbbb,
+);
+
+for my $item (keys %default_opt){
+	set_curlopt($item => $default_opt{$item});
+}
+
+# Set passed opts
+for my $item (keys %{$inp{o}}) {
+	if(exists($map{$item})) {
+		if(exists($zero_term{$item}) ){
+			set_curlopt($map{$item} => $inp{o}->{$item} . "\0");
+		}
+		else {
+			set_curlopt($map{$item} => $inp{o}->{$item});
+		}
+	}
+	else {
+		warn "Not a valid option: $item\n";
+	}
+}
+# Set default opts
+
+if($data){
+	if(open my $fh, "<", $data) {
+		local $/;
+		my $d  = <$fh>;
+		set_curlopt(sprintf(CURLOPT_POST)          => 1);
+		set_curlopt(sprintf(CURLOPT_POSTFIELDS)    => $d);
+		set_curlopt(sprintf(CURLOPT_POSTFIELDSIZE) => length($d));
+	}
+	else {
+		warn "Unable to open file for reading: $data\n";
+		warn "Can't continue";
+		exit(1);
+	}
+}
+
+my ($fh_err,$fh_out);
+if($errfile) {
+	open $fh_err,">", $errfile
+		or warn "Unable to open errfile $errfile for writing: $!\n";
+}
+else {
+	$fh_err = \*STDERR;
+}
+
+if($file) {
+	open $fh_out,">",$file
+		or warn "Unable to open outfile $file for writing: $!\n";
+}
+else {
+	$fh_out = \*STDOUT;
+}
+
+# Check error here
+set_curlopt(sprintf(CURLOPT_URL) => $url);
+# Actual curl. Need to make it print body only if a passable option is specified.
+my $res;
+eval {
+		set_curlopt(sprintf(CURLOPT_STDERR)     => $fh_err);
+		set_curlopt(sprintf(CURLOPT_WRITEDATA)  => $fh_out);
+		$res  = $curl->perform();
+};
+if($@) {
+	die "Curl fetch resulted in error: $@\n";
+}
+
+print Dump $res if $verbose;
+
+# http://curl.haxx.se/libcurl/c/curl_easy_getinfo.html
+my %wanted  = (
+	http_code      => sprintf(CURLINFO_RESPONSE_CODE),
+	effective_url  => sprintf(CURLINFO_EFFECTIVE_URL),
+	total_time     => sprintf(CURLINFO_TOTAL_TIME),
+	dns_time       => sprintf(CURLINFO_NAMELOOKUP_TIME),
+	connect_time   => sprintf(CURLINFO_CONNECT_TIME),
+	tx_prestart    => sprintf(CURLINFO_PRETRANSFER_TIME),
+	tx_start       => sprintf(CURLINFO_STARTTRANSFER_TIME),
+	redir_time     => sprintf(CURLINFO_REDIRECT_TIME),
+	redir_count    => sprintf(CURLINFO_REDIRECT_COUNT),
+	redir_url      => sprintf(CURLINFO_REDIRECT_URL),
+	upload_size    => sprintf(CURLINFO_SIZE_UPLOAD),
+	download_size  => sprintf(CURLINFO_SIZE_DOWNLOAD),
+	download_speed => sprintf(CURLINFO_SPEED_DOWNLOAD),
+	request_size   => sprintf(CURLINFO_REQUEST_SIZE),
+);
+my %output;
+
+#for my $item (keys %wanted) {
+#	print "$item  : ", $curl->getinfo($wanted{$item}) . "\n"
+#		if $curl->getinfo($wanted{$item});
+#}
+map {
+	$output{$_} = $curl->getinfo($wanted{$_});
+} keys %wanted;
+print Dump \%output;

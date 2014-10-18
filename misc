@@ -1,0 +1,139 @@
+#!/home/y/bin/perl -w
+#use strict;
+use Getopt::Long;
+use POSIX;
+use YAML::Syck;
+
+
+
+
+
+my $process_name = 'traffic_server';
+my $delay = 60;
+my $stamp = time();
+my $started = 0;
+
+my $old_conns;
+
+while (1) {
+
+	my $inter = get_inter();
+	my $filesnr = get_filesnr();
+	my $process_stat = get_process_stat();
+	my $connections = get_network_connections();
+	print Dump $inter;
+	print Dump $filesnr;
+	print Dump $process_stat;
+	print Dump $connections;
+	sleep $delay;
+}
+
+sub get_inter {
+	my $int;
+	open my $f, "<", "/proc/stat"
+		or return 0;
+	while (my $line = <$f>) {
+		if ( $line =~ /^\s*(cpu\d*)\s+
+	                        \d+\s+   #2 user
+                                \d+\s+   #3 nuce
+                                \d+\s+   #4 system
+                                \d+\s+   #5 idle
+                                \d+\s+   #6 iowait
+                                (\d+)\s+   #7 irq
+                                (\d+)\s+   #8 softirq
+                                \d+\s+   #9 blah
+                                \d+\s*$  #10 blah
+                        /sixm) {
+			$int->{$1}->{irq} = $2;
+			$int->{$1}->{softirq} = $3;
+			my %hash_irq = (
+				$1 => $2,
+			);
+			write_scoreboard('proc_stat','irq',{ $1 => $2 });
+			my %hash_softirq = (
+				$1 => $3,
+			);
+			write_scoreboard('proc_stat','softirq',{ $1 => $3 });
+
+		}
+#		if ( $line =~ /^\s*intr\s+(\d+)\s+/) {
+#			$int->{tot} = $1;
+#		}
+	}
+	return $int;
+}
+
+sub get_filesnr {
+	my $nrfiles;
+	open my $f, "<", "/proc/sys/fs/file-nr"
+		or return 0;
+	while ( my $line = <$f> ) {
+		if ( $line =~ /^\s*(\d+)\s+/) {
+			$nrfiles->{'files'} = $1;
+		}
+	}
+	write_scoreboard('proc_stat','nrfiles',{ nrfiles => $nrfiles->{'files'}} );
+	return $nrfiles if $nrfiles;
+	return 0;
+}
+
+sub get_process_stat {
+	my $pstat;
+	my $count = 0;
+	open my $cmd, "ps -e -L -o pid,ppid,lwp,pmem,pcpu,rss,vsz,args|"
+		or return 0;
+	while ( my $line = <$cmd>) {
+		next unless $line =~ /$process_name/;
+		$count++;
+		my ($pid,$ppid,$lwp,$pmem,$pcpu,$rss,$vsz,$args) = split(/\s+/,$line);
+		if ( $pid == $lwp ) {
+			$pstat->{proc0}->{lwp}  = $pid;
+			$pstat->{proc0}->{pcpu} = $pcpu;
+			$pstat->{proc0}->{rss}  = $rss;
+			$pstat->{proc0}->{vsz}  = $vsz;
+			write_scoreboard('proc_stat','ats-total',{ pcpu => $pcpu, rss => $rss, vsz => $vsz });
+		}
+		else {
+			$pstat->{'proc'.$count}->{lwp}  = $lwp;
+			$pstat->{'proc'.$count}->{pcpu} = $pcpu;
+			write_scoreboard('proc_stat','ats-cpu', { 'proc'.$count => $pcpu });
+		}
+	}
+	return $pstat;
+}
+
+
+sub get_syscall {
+}
+
+sub get_network_connections {
+        my $conns;
+        my $new_conns;
+        open my $s, "netstat -s|"
+                or die "Unable to open pipe: $!\n";
+        while(my $line = <$s>) {
+                if ($line =~ /^\s*(\d+)\s+active\s+connections\s+openings/) {
+                        $conns = $1;
+                        last;
+                }
+        }
+        unless($conns) { die "Unable to get connection info\n"; };
+        if ( $old_conns ) {
+                $new_conns = int ( ($conns - $old_conns) / $delay);
+                die "Some thing went wrong, got negative connections\n"
+                        if $new_conns < 0;
+                warn "Connections created / second: $new_conns\n";
+                write_scoreboard('proc_stat','net-connections', { 'connspersec' => $new_conns });
+                $old_conns = $conns;
+        }
+        else {
+                warn "No old connection info. Was i restarted?\n";
+                $old_conns = $conns;
+        }
+        return $new_conns;
+}
+
+
+sub write_scoreboard {
+# Add code here
+}

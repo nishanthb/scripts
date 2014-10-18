@@ -1,0 +1,46 @@
+# TCP  ipv6 transparent proxy
+global
+    user nobody
+    group nobody
+    spread-checks 3
+    # tune.maxaccept -1
+    maxconn 20000
+    daemon
+    nbproc 1
+    pidfile /tmp/haproxy.pid
+
+defaults def_settings
+    timeout connect 250
+    timeout server 10000
+    timeout client 15000
+    mode tcp
+    maxconn 2000
+    balance roundrobin
+
+
+frontend ipv6_frontend  i::p::v::6:80
+    bind ::1:80
+    default_backend ipv6_backend
+
+backend ipv6_backend
+    option httpchk HEAD / HTTP/1.0
+    server localhost 127.0.0.1:80  check inter 30000 fastinter 10000 rise 3 fall 2
+
+
+backend ipv6_backend_xff
+     server localhost 127.0.0.1:80 track ipv6_backend/localhost
+
+
+
+frontend ipv6_frontend_443  i::p::v::6:443
+# We need the latest haproxy here. It supports formats like bind ipv6@80 etc
+    bind ::1:443
+    default_backend ipv6_backend_443
+
+backend ipv6_backend_443
+    option httpchk HEAD / HTTP/1.0
+    server localhost 127.0.0.1:443  check inter 30000 fastinter 10000 rise 3 fall 2
+
+
+backend ipv6_backend_443_xff
+     server localhost 127.0.0.1:443 track ipv6_backend_443/localhost

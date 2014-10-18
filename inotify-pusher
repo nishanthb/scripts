@@ -1,0 +1,178 @@
+#!/usr/bin/perl
+# decided not to use this for various reasons.
+
+# So instead we will just do pushes after a certain interval without using inotify
+use strict;
+use warnings 'all';
+
+use YAML::Syck;
+use Net::Domain;
+use Linux::Inotify2;
+
+use Crazy qw(:all);
+use Getopt;
+
+
+
+my $opt = Getopt->new(
+  options     		=>  {
+    'd|dir=s' 		=> 'Root cache dir to watch',
+    'v|verbose'    	=> 'Verbose',
+    'p|path=s'		=> 'Root path on remote machine',
+    'u|user=s'		=> 'User to run push as',
+    'i|identity=s'	=> 'Identity file for user',
+    'm|maxfork=i'	=> 'Max concurrent connection to distmasters',
+    'r|range=s'		=> 'Range to push to',
+    't|types=s'		=> 'Type of files to monitor. pipe separated',	# or s@  and handle each
+    'y|yes'			=> 'Really push',
+  },
+  default     		=>  {
+     d             	=> '/var/pcaches',
+     p				=> '/ec/pcaches/__COLO__/',	# This will be replaced by colo
+     r				=> '%distroot1',
+     m				=> 10,
+     t				=> 'bz2|tar|gz|xml',
+     u				=> 'gdt',				# really?
+     i				=> '/home/www/.ssh/identity-www',
+  },
+  required    		=>  [ qw( u i ) ],
+  description 		=>  'Script to mirror caches',
+);
+
+
+
+my $watch_dir 	= $opt->get('d');
+my $verbose 	= $opt->get('v');
+my $rem_path 	= $opt->get('p');
+my $user 	= $opt->get('u');
+my $identity 	= $opt->get('i');
+my $maxfork	= $opt->get('m');
+my $range 	= $opt->get('r');
+my $regex	= $opt->get('t');
+my $yes		= $opt->get('y');
+
+
+# Initialize notify
+my $notify	= Linux::Inotify2->new()
+    or die "No notify\n";
+
+# Find my hostname, required to get colo
+my $hostname	= Net::Domain::hostfqdn();
+
+my $colo;
+if ( $hostname  =~ /(\w\w\d)(?:$|.xxxxx.com$)/ ) {
+	$colo	= uc($1);
+};
+die   "No colo found\n" unless $colo;
+print "Found colo: $colo\n" if $verbose;
+
+# Watch main dir for new files/dirs
+add_watch ($notify,$watch_dir);
+
+# Watch pre existing dirs in main dir. We just need one level down.
+# use File::Find and -d
+for my $dir ( <$watch_dir/*> ) {
+	if  ( -d $dir ) {
+		print "Watching pre-existing dir $dir\n" if $verbose;
+		add_watch($notify,$dir);
+	}
+}
+
+# Adding watches for each dir
+sub add_watch {
+ 	my ($notify,$dir) = @_;
+	$notify->watch($dir,
+		IN_CREATE|IN_CLOSE,	# Create file or dir, close after write file
+		\&handle_new
+	);
+}
+
+# Handle new dirs/files
+sub handle_new {
+    my $obj	 = shift;
+    my $name	 = $obj->name();
+    my $fullname = $obj->fullname();
+
+	# I am a dir, watch me
+    if ( $name and  -d "$watch_dir/$name" ) {
+	print "New dir $watch_dir/$name\n" if $verbose;	# fullname for multilevel
+	add_watch($notify,"$watch_dir/$name");
+    }
+	# I am a file, push or ignore
+
+    if ( -f $fullname and $obj->IN_CLOSE) {		# Only want it when the file is closed
+	print "New file $fullname\n"	   if $verbose;
+	handle_file($fullname);
+    }
+}
+
+# Handle new file - start push if regex is matched
+sub handle_file {
+    my ($name) = shift;
+    chomp ($name);
+    return if $name =~ /^\./;	# No dot files
+    return if -s $name == 0;	# No 0 byte files
+    if ($name  =~ /($regex)$/ ) {
+	print "New file $name appeared matching $regex.\n" if $verbose;
+	push_dir();
+    }
+    else {
+        print "Ignoring file $name since it does not match regex\n"
+    }
+}
+
+# Actual push
+sub push_dir{
+	# We rsync the entire stuff if there is a new file
+	# It probably is better to just copy the new file.
+	# Not good usage of inotify, but thats the way we want it
+	print "Pushing dirs to gdt masters\n";
+	$rem_path =~ s/__COLO__/$colo/;
+
+	die "Unable to read $identity\n"
+		unless -r $identity;
+
+	my $rsync_ssh = "rsync -az --hard-links --copy-links ";
+	$rsync_ssh   .= "-e 'ssh-2222 -o StrictHostKeyChecking=no -o TcpRcvBufPoll=no -c blowfish-cbc -p 2222 "; # HPNSSH
+	$rsync_ssh   .= "  -o User=$user -o ConnectTimeout=60 -o IdentityFile=$identity ' ";
+	$rsync_ssh   .= " --delete --exclude='tmp' --include='*/' --exclude='*' ";
+
+	for my $ftype (split(/\|/,$regex)) { 	# This is why we dont use $regex = qr /.../o
+		$rsync_ssh .= " --include='*.$ftype' ";
+	}
+	$rsync_ssh   .= " --progress -av --timeout=300 --stats ";
+
+	print "Using rsync cmd: $rsync_ssh $watch_dir/* dest:$rem_path/\n"
+		if $verbose;
+
+	return unless $yes;
+
+	my $mcmd = Crazy::cmd->new(
+		range		 => $range,
+		cmd		 => "$rsync_ssh $watch_dir/* {}:$rem_path/",
+		maxflight 	 => $maxfork,
+		global_timeout	 => 1200,
+		timeout		 => 240,
+		write_buf	 => '',
+		replace_hostname => '{}',
+	) or die "Mcmd died: [$!]\n";
+
+	if ( ! $mcmd->run ) {
+		die $mcmd->error;
+	}
+
+	while ( my($hname,$obj)  = each(%{mcmd->failed_nodes}) ) {
+		my $read_buf 	 = $obj->readbuf;
+		my $error_buf 	 = $obj->error_buf;
+		print $obj->name, " failed with output ",
+			$read_buf, " error ", $error_buf, "\n";
+	};
+}
+
+# real foo
+1 while $notify->poll;
+
+__END__
+# daemontools: cache_push -y -v  -u user -i 'identity file for user'
+# rpm dependencies: perl-Linux-Inotify2
+# vim: set tabstop=4 fdm=marker :

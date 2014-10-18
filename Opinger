@@ -1,0 +1,190 @@
+#!/usr/bin/perl -W
+# vim: set tabstop=4 fdm=marker :
+# Parallely ping multiple hosts over ipv4 and ipv6
+# Return results in a yaml, additionally send latency.
+# ./pinger  -r <range> -6    -v -y yams
+# ./pinger  -r <range>     -v -u /tmp/dumpfile (.timestamp.yaml added by script)
+
+# This is waiting on bug 6915947. We need it added as a ports package.
+
+use strict;
+
+use Range;
+use Crazy qw(:all);
+
+use YAML::Syck;
+use JSON::Syck;
+use Net::Oping;
+use Net::Domain;
+use Getopt::Long;
+
+
+die "Run me as root, required for icmp.\n" if $<;
+
+
+
+use constant Y_APP => 'pinger';
+
+my %opt = (
+	"h|help"          => "Prints help",
+	"v|verbose"       => "Verbose mode",
+	"n|nodes=s@"      => "Hosts to ping, use -h host1 -h host2 ...",
+	"6|v6"            => "Ping using ipv6 if available",
+	"t|ttl=i"         => "TTL for ping, 1-255, not normally required",
+	"f|file=s"        => "Read hosts from a file",
+	"d|timeout=i"     => "Timeout for ping, defult 5 seconds",
+	"r|range=s"       => "Range to act on",
+	"u|dumpfile=s"    => "YAML Dump file, timestamped",
+	"l|filter=s"      => "Filter to dump output to, can be used to send data to monitoring other than yms",
+);
+
+my %inp;
+
+sub usage {
+    print "Usage: $0 [opts], where opts are:\n";
+    map {
+        my ( $va, $vb ) = ( split(/\|/) );
+        $vb =~ s/=.+// if $vb;
+        printf "\t-%s  --%-10s%s\n",
+            $va, $vb ? $vb : $va, $opt{$_};
+    } sort keys %opt;
+	print "eg: ./pinger  -r <range>    -v  -u /tmp/foo\n";
+    exit 1;
+}
+
+
+GetOptions(\%inp,keys %opt)
+        or die "Unable to get options\n";
+
+
+my $hostname = Net::Domain::hostfqdn();
+#my $colo;
+
+
+
+my $now     = time();
+my $v6      = $inp{6};
+my $timeout = $inp{d} ||= '5';
+my $verbose = $inp{v};
+my $ttl     = $inp{t};
+my @nodes   = @{$inp{n}} if $inp{n};
+
+my $range   = $inp{r};
+my $dump    = $inp{u};
+my $file    = $inp{f};
+my $filter  = $inp{l};
+
+my @range;
+
+if ($dump) {
+	$dump .= '-' . $now . '.yaml';
+}
+
+if ($range) {
+	my $r   = Range->new();
+	@range    = $r->expand($range);
+
+}
+
+if ($file) {
+	if ( open my $fh,"<",$file ) {
+		push(@nodes,$_) for <$fh>;
+	}
+	else {
+		warn "Unable to read from $file: $!\n";
+	}
+}
+
+@nodes = (@nodes,@range);
+
+usage() if $inp{h};
+usage() unless @nodes;
+
+my $ip   = get_ips();
+
+
+my $result;
+$result->{v6} = doping($ip->{v6}) if $v6;
+$result->{v4} = doping($ip->{v4});
+
+print YAML::Syck::Dump $result   if $verbose;
+YAML::Syck::DumpFile($dump,$result) if $dump;
+
+
+if ($filter) {
+	# This whole filter thing was added as an afterthought since we may not be using yms to monitor this
+	if($result->{v6}){
+		send_filter($result->{v6},'v6');
+	}
+	if($result->{v4}){
+		send_filter($result->{v4},'v4');
+	}
+}
+
+# subs
+sub send_filter {
+	# Filter is just something that accepts yaml and formats it to the type of data your monitoring expects, then send it to the monitoring.
+	my ($res,$type) = @_;
+	open my $cmd, "|$filter $type"
+		or warn "Unable to open $cmd: [$!]\n";
+	if($cmd) {
+		my $temp = Dump $res;
+		print $cmd $temp;
+		close($cmd);
+	}
+}
+
+
+sub doping {
+	my ($bind) = @_;
+	my ($res, $ret);
+	my $ping = Net::Oping->new();
+
+	$ret = $ping->bind($bind);
+	die "Unable to bind to $bind, returned $ret, error: ",
+		$ping->get_error(),"\n" unless $ret;
+
+	if ($ttl) {
+		$ret = $ping->ttl($ttl);
+		warn "Unable to set ttl $ttl, returned $ret, error: ",
+			$ping->get_error(), "\n" unless $ret;
+	}
+
+	$ret = $ping->timeout($timeout);
+	warn "Unable to set timeout $timeout, returned $ret, error: ",
+		$ping->get_error(), "\n" unless $ret;
+
+	for my $node (@nodes) {
+		if (1 != $ping->host_add($node) ) {
+			warn "Adding $node failed, returned $ret, error: ",
+				$ping->get_error(),"\n" unless $ret;
+		}
+	}
+
+	my $latency = $ping->ping();
+	my $error   = $ping->get_error();
+	if ($error ne 'Success') {
+		warn "Pinger returned error: $error\n";
+	}
+	my $dropped = $ping->get_dropped();
+	my $recvttl = $ping->get_recv_ttl();
+
+	$res->{latency} = $latency;
+	$res->{ttl}     = $recvttl;
+	$res->{dropped} = $dropped;
+	$res->{error}   = $error;
+
+	return $res;
+}
+
+
+
+
+# Crazy sub to get ipv6 and ipv4 ip's
+#
+sub get_ips { 
+	my $ip;
+	$ip->{v6} = Crazy::get_eth_v6()
+	$ip->{v4} = Crazy::get_eth_v4()
+	return $ip;
+}

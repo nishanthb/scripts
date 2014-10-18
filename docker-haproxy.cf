@@ -1,0 +1,39 @@
+global
+    user nobody
+    group nobody
+    spread-checks 3
+    # tune.maxaccept -1
+    maxconn 20000
+    daemon
+    nbproc 1
+    pidfile /tmp/haproxy.pid
+
+
+
+defaults def_settings
+    timeout connect 250
+    timeout server 10000
+    timeout client 15000
+    mode http
+    maxconn 2000
+    balance roundrobin
+
+
+listen stats-1
+        bind :8999
+        bind-process 1
+        stats uri /
+
+
+frontend rg_frontend  *:1234
+    default_backend range_backend
+
+backend rg_backend
+    option httpchk GET /rg/status HTTP/1.0
+    server localhost  127.0.0.1:9393  check inter 30000 fastinter 10000 rise 3 fall 2
+    server docker 10.218.101.86:9393  check inter 30000 fastinter 10000 rise 3 fall 2
+
+
+backend rg_backend_xff
+     server localhost 127.0.0.1:9393 track rg_backend/localhost
+     server docker     10.2.3.4:9393 track rg_backend/docker

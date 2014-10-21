@@ -1,0 +1,51 @@
+global
+    user nobody
+    group nobody
+    spread-checks 3
+    # tune.maxaccept -1
+    maxconn 20000
+    daemon
+    nbproc 1
+    pidfile /tmp/haproxy.pid
+
+defaults def_settings
+    timeout connect 250
+    timeout server 10000
+    timeout client 15000
+    mode tcp
+    maxconn 2000
+    balance roundrobin
+
+
+frontend 3306_frontend
+   bind *:3306
+   default_backend 3307_backend
+   acl src_3309 src 67.195.90.72
+   acl src_3310 src -f /etc/haproxy/3310_hosts
+   acl src_3311 src -f /etc/haproxy/3311_hosts
+   acl src_3312 src 10.12.3.54
+   use_backend 3309_backend if src_3309
+   use_backend 3310_backend if src_3310
+   use_backend 3311_backend if src_3311
+   use_backend 3312_backend if src_3312
+
+
+#frontend 1236_frontend
+#   bind *:1236
+#   default_backend 1236_backend
+
+# default mysql server running on the host, not in container
+backend 3307_backend
+   server localhost_3307 127.0.0.1:3307
+
+backend 3309_backend
+   server localhost_3309 127.0.0.1:3309
+
+backend 3310_backend
+   server localhost_3310 127.0.0.1:3310
+
+backend 3311_backend
+   server localhost_3311 127.0.0.1:3311
+
+backend 3312_backend
+   server localhost_3312 127.0.0.1:3312

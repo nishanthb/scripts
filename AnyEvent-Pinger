@@ -64,6 +64,7 @@ my %ret      = map { $_ => undef } @nodes;	 # Initialize as undef
 
 
 for my $node (@nodes) { 
+	# Resolv since anyevent-ping crashes if the target does not resolve.
 	resolv($node) || next;
 	$cv->begin();
 	eval { 

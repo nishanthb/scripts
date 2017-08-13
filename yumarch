@@ -1,0 +1,5 @@
+#!/bin/sh
+echo -en "\$releasever "; rpm -q redhat-release
+echo -en "\$basearch "; uname -a
+
+python -c 'import yum, pprint; yb = yum.YumBase(); pprint.pprint(yb.conf.yumvar, width=1)'

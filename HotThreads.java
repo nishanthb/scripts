@@ -5,6 +5,9 @@
  *
  * To change this template, choose Tools | Template Manager
  * and open the template in the editor.
+ 
+ 
+ Usage: /usr/java/default/bin/java -cp HotThread.jar:/usr/java/default/lib/tools.jar hotthread.Main PID
  */
 
 package hotthread;

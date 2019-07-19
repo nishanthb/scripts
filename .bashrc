@@ -32,3 +32,15 @@ dates() {
         echo -en "IST: "; TZ='Asia/Calcutta'     date
 }
 
+export HISTTIMEFORMAT="%h/%d - %H:%M:%S $ "
+shopt -s checkwinsize
+
+export EDITOR=vi VISUAL=vi
+alias ls='ls -lph -G'
+export TERM=xterm-256color
+
+alias er="~/bin/er"
+
+
+alias er="~/bin/er"
+

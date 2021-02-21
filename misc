@@ -1,4 +1,4 @@
-#!/home/y/bin/perl -w
+#!/home/bin/perl -w
 #use strict;
 use Getopt::Long;
 use POSIX;
